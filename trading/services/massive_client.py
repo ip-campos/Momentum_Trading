@@ -368,4 +368,43 @@ class MassiveAPIClient:
                 time.sleep(delay_between_batches)
         return results
 
+    def get_price_on_date(
+            self, 
+            ticker: str,
+            target_date: datetime,
+            tolerance_days: int = 7 
+    ) -> Optional[float]:
+        start_date = target_date - timedelta(days=tolerance_days)
+        end_date = target_date + timedelta(days=tolerance_days)
+
+        try:
+            data = self.fetch_stock_data(
+                ticker=ticker,
+                start_date=start_date.strftime("%Y-%m-%d"),
+                end_date=end_date.strftime("%Y-%m-%d")
+            )
+
+            if not data:
+                return None
+
+            # Find closest date
+            target_date_obj = (
+                target_date if hasattr(target_date, "date") else target_date
+            )
+
+            if hasattr(target_date_obj, "date"):
+                target_date_obj = target_date_obj.date()
+
+            closest_data = min(
+                data, key=lambda x: abs((x["date"]-target_date_obj).days())
+            )
+
+            return float(closest_data["close"])
+
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error getting price for {ticker}: {str(e)}")
+            return None
+
                 
+def get_massive_client() -> MassiveAPIClient:
+    return MassiveAPIClient()

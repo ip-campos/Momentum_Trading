@@ -1,4 +1,5 @@
 from django.db import models
+from datetime import timezone
 
 class Stock(models.Model):
     ticker = models.CharField(max_length=10, unique=True, db_index=True)
@@ -36,6 +37,28 @@ class MomentumScore(models.Model):
     period_start = models.DateField()
     period_end = models.DateField()
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @classmethod
+    def calculate_quintiles_for_date(cls, calculation_date=None):
+        if calculation_date is None:
+            calculation_date = timezone.date().now()
+
+        # Get all momentum scores for the calculation date
+        scores = cls.objects.filter(calculation_date=calculation_date).order_by("-momentum_score")
+
+        if not scores.exists():
+            return
+
+        total_stocks = scores.count()
+        quintile_size = total_stocks // 5
+
+        # Update quintiles and rankings
+        for i, score in enumerate(scores):
+            score.rank = i + 1
+            quintile = min(5, (i // quintile_size) + 1) if quintile_size > 0 else 1
+            score.quintile = quintile
+            score.is_top_quintile = score.quintile == 1
+            score.save(update_fields=["rank", "quintile", "is_top_quintile"])
 
 class TradingSignal(models.Model):
     SIGNAL_TYPES = [
