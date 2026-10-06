@@ -25,7 +25,7 @@ class MomentumCalculator:
             calculation_date: datetime = None
     ) -> Optional[Decimal]:
         if calculation_date is None:
-            calculation_date = timezone.now.date()
+            calculation_date = timezone.now().date()
 
         # Get required dates
         twelve_months_ago = calculation_date - timedelta(days=365)
@@ -63,10 +63,10 @@ class MomentumCalculator:
             self, stock: Stock, target_date: datetime, tolerance_days: int = 7
     ) -> Optional[Decimal]:
         start_date = target_date - timedelta(days=tolerance_days)
-        end_date = target_date + timedelta(days=tolerance_days)
+        end_date = target_date
 
-        price_data = stock.price_data.filter(date__gte=start_date, date__lte=end_date).order_by("date").first()
-        return price_data.close if price_data else None
+        price_data = stock.price_data.filter(date__gte=start_date, date__lte=end_date).order_by("-date").first()
+        return price_data.close_price if price_data else None
 
     def _get_price_from_api(
             self, ticker: str, target_date: datetime
@@ -130,7 +130,7 @@ class MomentumCalculator:
                         logger.info(f"{action}  momentum score for {stock.ticker}: {momentum_decimal:.6f}")
                     else:
                         logger.warning(
-                            f"Could not calculate momentum for {stock.ticer}: "
+                            f"Could not calculate momentum for {stock.ticker}: "
                             f"price_12mo = {price_12mo}, price_1mo = {price_1mo}"
                         )
                 except (ValueError, TypeError) as e:
@@ -145,6 +145,9 @@ class MomentumCalculator:
             return self._calculate_momentum_scores_individual(
                 stock_list, calculation_date
             )
+
+        # Always return a list, including when no scores could be calculated.
+        return momentum_scores
 
 
     def _calculate_momentum_scores_individual(
@@ -270,7 +273,7 @@ class MomentumCalculator:
                         open_price=Decimal(str(data_point["open"])),
                         high=Decimal(str(data_point["high"])),
                         low=Decimal(str(data_point["low"])),
-                        close=Decimal(str(data_point["close"])),
+                        close_price=Decimal(str(data_point["close"])),
                         volume=data_point["volume"],
                         adjusted_close=Decimal(str(data_point["close"]))
                     )

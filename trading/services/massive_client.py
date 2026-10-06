@@ -27,7 +27,7 @@ class MassiveAPIClient:
 
     def _rate_limit(self):
         """Rate limit to avoid hitting API limits"""
-        current_time = time.time()
+        current_time = time.monotonic()
         # Remove requests older than 1 minute
         self.request_times = [t for t in self.request_times if current_time - t < 60]
         if len(self.request_times) >= self.requests_per_minute:
@@ -35,6 +35,10 @@ class MassiveAPIClient:
             if sleep_time > 0:
                 logger.info(f"Rate limiting: sleeping for {sleep_time:.2f} seconds")
                 time.sleep(sleep_time)
+
+        current_time = time.monotonic()
+        self.request_times = [t for t in self.request_times if current_time - t < 60]
+        self.request_times.append(current_time)
 
     def fetch_stock_data(
             self,
@@ -55,9 +59,8 @@ class MassiveAPIClient:
         if use_cache and cache_key in self.cache:
             logger.info(f"Using cached data for {ticker}")
             return self.cache[cache_key]
-        self._rate_limit()
-
         for attempt in range(max_retries):
+            self._rate_limit()
             try:
                 aggs = []
                 for agg in self.client.list_aggs(
@@ -76,6 +79,7 @@ class MassiveAPIClient:
                             "high": agg.high,
                             "low": agg.low,
                             "close": agg.close,
+                            "volume": agg.volume,
                             "vwap": getattr(agg, "vwap", None),
                             "transactions": getattr(agg, "transactions", None)
                         }
@@ -189,7 +193,11 @@ class MassiveAPIClient:
                     momentum_data, missing_tickers, calculation_date
                 )
 
-            logger.info(f"Successfully fetched momentum data using only 2 API calls!")
+            complete_count = sum(
+                values["price_12mo"] is not None and values["price_1mo"] is not None
+                for values in momentum_data.values()
+            )
+            logger.info("Momentum data complete for %d/%d tickers", complete_count, len(tickers))
 
         except Exception as e:
             logger.error(
@@ -236,7 +244,7 @@ class MassiveAPIClient:
                 momentum_data[ticker] = {"price_12mo": None, "price_1mo": None}
                 continue
             # Convert to DataFrame for easier date filtering
-            df = pd.Dataframe(data)
+            df = pd.DataFrame(data)
             if df.empty:
                 momentum_data[ticker] = {"price_12mo": None, "price_1mo": None}
                 continue
@@ -264,57 +272,99 @@ class MassiveAPIClient:
             calculation_date: datetime
     ) -> dict[str, dict[str, Optional[float]]]:
         """
-        Handle missing data by trying nearby dates
+        Fill missing prices using up to seven calendar days before each target.
         """
         twelve_months_ago = calculation_date-timedelta(days=365)
         one_month_ago = calculation_date-timedelta(days=30)
 
-        # Try dates within a 7-day window
-        for day_offset in [1, 2, 3, 4, 5, 6, 7, -1, 2, -3, -4, -5, -6, -7]:
+        target_dates = (
+            ("price_12mo", twelve_months_ago),
+            ("price_1mo", one_month_ago),
+        )
+
+        for days_back in range(1, 8):
+            for price_key, target_date in target_dates:
+                pending = {
+                    ticker for ticker in missing_tickers
+                    if momentum_data[ticker][price_key] is None
+                }
+                if not pending:
+                    continue
+
+                fallback_date = target_date - timedelta(days=days_back)
+                # US stock daily bars do not need weekend requests.
+                if fallback_date.weekday() >= 5:
+                    continue
+
+                try:
+                    self._rate_limit()
+                    rows = list(self.client.get_grouped_daily_aggs(
+                        date=fallback_date, adjusted=True
+                    ) or [])
+                    found = 0
+                    for agg in rows:
+                        ticker = getattr(agg, "ticker", None)
+                        close = getattr(agg, "close", None)
+                        if ticker in pending and close is not None:
+                            momentum_data[ticker][price_key] = float(close)
+                            pending.remove(ticker)
+                            found += 1
+
+                    if pending:
+                        logger.warning(
+                            "MOMENTUM: %s date=%s: %d rows, %d prices found, "
+                            "%d tickers still missing",
+                            price_key, fallback_date, len(rows), found, len(pending),
+                        )
+                    else:
+                        logger.info(
+                            "MOMENTUM: %s date=%s: %d prices found",
+                            price_key, fallback_date, found,
+                        )
+                except Exception:
+                    logger.exception(
+                        "MOMENTUM: API error fetching %s date=%s",
+                        price_key, fallback_date,
+                    )
+
+            missing_tickers = [
+                ticker for ticker in missing_tickers
+                if (
+                    momentum_data[ticker]["price_12mo"] is None
+                    or momentum_data[ticker]["price_1mo"] is None
+                )
+            ]
             if not missing_tickers:
                 break
 
-            # Try 12-month fallback
-            fallback_12mo_date = twelve_months_ago + timedelta(days=day_offset)
-            try:
-                self._rate_limit()
-                fallback_12mo_data = self.client.get_grouped_daily_aggs(
-                    date=fallback_12mo_date, adjusted=True
-                )
-
-                for agg in fallback_12mo_data:
-                    if hasattr(agg, "ticker") and agg.ticker in missing_tickers:
-                        if not momentum_data[agg.ticker]["price_12mo"]:
-                            momentum_data[agg.ticker]["price_12mo"] = float(agg.close)
-                            logger.debug(
-                                f"Found a 12mo price for {agg.ticker} on {fallback_12mo_date}"
-                                )
-            except:
-                pass
-
-            # Try 1 month fallback
-            fallback_1mo_date = one_month_ago + timedelta(days=day_offset)
-            try:
-                self._rate_limit()
-                fallback_1mo_data = self.client.get_grouped_daily_aggs(
-                    date=fallback_1mo_date, adjusted=True
-                )
-
-                for agg in fallback_1mo_data:
-                    if hasattr(agg, "ticker") and agg.ticker in missing_tickers:
-                        if not momentum_data[agg.ticker]["price_1mo"]:
-                            momentum_data[agg.ticker]["price_1mo"] = float(agg.close)
-                            logger.debug(
-                                f"Found a 1mo price for {agg.ticker} on {fallback_1mo_date}"
-                                )
-            except:
-                pass
-
-            # Update missing tickers list
-            missing_tickers = [t for t in missing_tickers 
-                               if not momentum_data[t]["price_12mo"] or momentum_data[t]["price_1mo"]]
+        if missing_tickers:
+            logger.warning(
+                "MOMENTUM: missing prices after the 7-day search: %s",
+                ", ".join(missing_tickers),
+            )
 
         return momentum_data
+
+    def _find_closest_price(
+        self, df: pd.DataFrame, target_date: datetime, tolerance_days: int = 7
+    ) -> Optional[float]:
+        """Return the latest available close on or before the target date."""
+        if df.empty:
+            return None
+        if isinstance(target_date, datetime):
+            target_date = target_date.date()
+        target = pd.Timestamp(target_date)
+        dates = pd.to_datetime(df["date"])
+        eligible = df.loc[
+            (dates >= target - timedelta(days=tolerance_days))
+            & (dates <= target)
+            & df["close"].notna()
+        ].copy()
+        if eligible.empty:
+            return None
+        eligible["date"] = pd.to_datetime(eligible["date"])
+        row = eligible.sort_values("date").iloc[-1]
+        return float(row["close"])
 
     def fetch_multiple_stocks(
             self,
@@ -369,41 +419,93 @@ class MassiveAPIClient:
         return results
 
     def get_price_on_date(
-            self, 
-            ticker: str,
-            target_date: datetime,
-            tolerance_days: int = 7 
+        self, 
+        ticker: str, 
+        target_date: datetime, 
+        tolerance_days: int = 7
     ) -> Optional[float]:
         start_date = target_date - timedelta(days=tolerance_days)
-        end_date = target_date + timedelta(days=tolerance_days)
-
+        end_date = target_date
+        
         try:
             data = self.fetch_stock_data(
                 ticker=ticker,
-                start_date=start_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d")
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d')
             )
-
+            
             if not data:
                 return None
-
-            # Find closest date
-            target_date_obj = (
-                target_date if hasattr(target_date, "date") else target_date
-            )
-
-            if hasattr(target_date_obj, "date"):
+            
+            # Find the closest date
+            target_date_obj = target_date if hasattr(target_date, 'date') else target_date
+            if hasattr(target_date_obj, 'date'):
                 target_date_obj = target_date_obj.date()
-
+                
             closest_data = min(
-                data, key=lambda x: abs((x["date"]-target_date_obj).days())
+                data, 
+                key=lambda x: abs((x['date'] - target_date_obj).days)
             )
-
-            return float(closest_data["close"])
-
+            
+            return float(closest_data['close'])
+            
         except (ValueError, TypeError) as e:
-            logger.error(f"Error getting price for {ticker}: {str(e)}")
+            logger.error(f"Error getting price for {ticker} on {target_date}: {str(e)}")
             return None
+
+    def get_sp500_tickers(self) -> list[str]:
+        return [
+            "AAPL",
+            "MSFT",
+            "NVDA",
+            "JNJ",
+            "GOOGL",
+            "GOOG",
+            "AMZN",
+            "META",
+            "TSLA",
+            "BRK.B",
+            "UNH",
+            "JPM",
+            "V",
+            "PG",
+            "XOM",
+            "HD",
+            "CVX",
+            "MA",
+            "BAC",
+            "ABBV",
+            "PFE",
+            "AVGO",
+            "KO",
+            "COST",
+            "DIS",
+            "TMO",
+            "WMT",
+            "DHR",
+            "NEE",
+            "VZ",
+            "ABT",
+            "MRK",
+            "ADBE",
+            "CRM",
+            "NFLX",
+            "NKE",
+            "INTC",
+            "AMD",
+            "T",
+            "TXN",
+            "COP",
+            "LLY",
+            "PM",
+            "RTX",
+            "HON",
+            "CMCSA",
+            "UPS",
+            "QCOM",
+            "SBUX",
+            "LOW"
+        ]
 
                 
 def get_massive_client() -> MassiveAPIClient:

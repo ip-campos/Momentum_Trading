@@ -1,5 +1,5 @@
 from django.conf import settings
-from snaptrade_client import SnapTrade
+from snaptrade_client import SnapTrade, SnapTradeAuth
 from portfolio.models import Portfolio, Position, Trade
 from trading.models import Stock
 from decimal import Decimal
@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 class TradingExecuter:
     def __init__(self):
-        self.snaptrade = SnapTrade(
+        self.snaptrade = SnapTrade(auth=SnapTradeAuth.commercial_api_key(
             consumer_key = settings.SNAPTRADE_CLIENT_SECRET,
             client_id = settings.SNAPTRADE_CLIENT_ID
+        )
         )
 
     def sync_portfolio_positions(

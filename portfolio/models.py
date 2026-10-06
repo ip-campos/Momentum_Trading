@@ -1,4 +1,5 @@
 from django.db import models
+from decimal import Decimal
 
 class Portfolio(models.Model):
     name = models.CharField(max_length=100, unique=True)
@@ -16,6 +17,16 @@ class Portfolio(models.Model):
     class Meta:
         db_table = "portfolios"
         ordering = ["name"]
+
+    def calculate_total_value(self):
+        positions_value = sum(
+            position.current_value for position in self.positions.filter(quantity__gt=0)
+        )
+        self.total_value = self.current_balance + positions_value
+        return self.total_value
+
+    def get_current_positions(self):
+        return self.positions.filter(quantity__gt=0).select_related("stock")
 
 class Position(models.Model):
     portfolio = models.ForeignKey(
@@ -38,6 +49,46 @@ class Position(models.Model):
         db_table = "positions"
         unique_together = ("portfolio", "stock")
         ordering = ["-current_value"]
+
+    def update_current_value(self, current_price=None):
+        if current_price:
+            self.current_price = current_price
+
+        if self.current_price and self.quantity > 0:
+            self.current_value = Decimal(str(self.quantity)) * self.current_price
+            cost_basis = Decimal(str(self.quantity)) * self.average_cost
+            self.unrealized_pnl = self.current_value - cost_basis
+
+            if cost_basis > 0:
+                self.unrealized_pnl_percent = (self.unrealized_pnl / cost_basis) * 100
+
+        else:
+            self.current_value = 0
+            self.unrealized_pnl = 0
+            self.unrealized_pnl_percent = 0
+
+    def add_shares(self, quantity, price):
+        if self.quantity > 0:
+            total_cost = (self.quantity * self.average_cost) + (quantity*price)
+            total_shares = self.quantity + quantity
+            self.average_cost = total_cost / total_shares
+
+        else:
+            self.average_cost = price
+
+        self.quantity += quantity
+        self.update_current_value(price)
+
+    def remove_shares(self, quantity, price):
+        if quantity >= self.quantity:
+            self.quantity = 0
+            self.average_cost = 0
+            self.current_value = 0
+            self.unrealized_pnl = 0
+            self.unrealized_pnl_percent = 0
+        else:
+            self.quantity -= quantity
+            self.update_current_value(price)
 
 class Trade(models.Model):
     TRADE_TYPES = [

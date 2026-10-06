@@ -71,7 +71,7 @@ class TradingSignal(models.Model):
     )
     signal_date = models.DateField(db_index=True)
     signal_type = models.CharField(max_length=4, choices=SIGNAL_TYPES)
-    MomentumScore = models.ForeignKey(
+    momentum_score = models.ForeignKey(
         MomentumScore, on_delete=models.CASCADE, null=True
     )
     target_quantity = models.IntegerField(null=True, blank=True)
